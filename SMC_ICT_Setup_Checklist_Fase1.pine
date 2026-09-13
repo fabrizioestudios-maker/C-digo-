@@ -54,8 +54,8 @@ i_mssMinDispATR   = input.float(0.0, "Desplazamiento mínimo para validar MSS (x
 // ---- 4. EQUILIBRIUM ----
 grpEQ = "4. Equilibrium"
 i_eqSource        = input.string("Swing Externo", "Dealing Range usado para Equilibrium", options = ["Swing Externo", "Swing Interno", "Último válido", "Manual"], group = grpEQ)
-i_manualHigh      = input.float(na, "Manual: High del rango", group = grpEQ)
-i_manualLow       = input.float(na, "Manual: Low del rango", group = grpEQ)
+i_manualHigh      = input.float(0.0, "Manual: High del rango", group = grpEQ)
+i_manualLow       = input.float(0.0, "Manual: Low del rango", group = grpEQ)
 i_showEquilibrium = input.bool(true, "Mostrar línea de Equilibrium (50%)", group = grpEQ)
 
 // ---- 5. GENERAL / DEBUG FASE 1 ----
