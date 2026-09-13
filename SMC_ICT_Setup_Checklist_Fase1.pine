@@ -1,0 +1,403 @@
+//@version=6
+indicator("SMC/ICT Setup Checklist [TLAB] - Fase 1", shorttitle = "SMC Checklist F1", overlay = true, max_labels_count = 300)
+
+// #####################################################################################################
+// SMC/ICT SETUP CHECKLIST - FASE 1
+// Alcance de esta fase: Estructura de Mercado, Liquidity Sweep, MSS Confirmed, Equilibrium.
+// Las Fases 2-5 (FVG, HTF PDA, Targets, Macro Window, Volume Influx, Checklist visual completo,
+// Score, State Machine, Alertas) se desarrollarán en entregas posteriores según lo solicitado.
+//
+// CRITERIOS OBJETIVOS UTILIZADOS EN ESTA FASE (ver explicación completa en el chat):
+//  - BOS = ruptura (por cierre o mecha, configurable) en la MISMA dirección del bias vigente.
+//  - MSS = ruptura en dirección CONTRARIA al bias vigente (si el bias era Neutral, se trata como BOS,
+//    ya que no existe una estructura previa opuesta de la cual "cambiar").
+//  - Liquidity Sweep = el precio toma (wick) un pivote interno (o pool de Equal High/Low) y luego
+//    CONFIRMA en contra, por cierre o por desplazamiento (vela con cuerpo >= factor x ATR), dentro de
+//    un número máximo de barras configurable.
+//  - MSS Confirmed = un MSS interno cuya ruptura ocurre dentro de un número máximo de barras después
+//    de un Liquidity Sweep en la dirección correspondiente (SSL swept -> MSS alcista / BSL swept ->
+//    MSS bajista), con un filtro opcional de desplazamiento mínimo.
+//  - Equilibrium = 50% del rango entre el pivote alto y bajo de la fuente de dealing range elegida.
+// #####################################################################################################
+
+
+// =====================================================================================================
+// INPUTS
+// =====================================================================================================
+
+// ---- 1. ESTRUCTURA DE MERCADO ----
+grpMS = "1. Estructura de Mercado"
+i_extLen        = input.int(50, "Swing externo (barras a cada lado)", minval = 1, group = grpMS, tooltip = "Usado por ta.pivothigh/ta.pivotlow para confirmar un swing EXTERNO. El pivote se confirma recién 'extLen' barras después de formado (no repinta).")
+i_intLen        = input.int(5, "Swing interno (barras a cada lado)", minval = 1, group = grpMS, tooltip = "Igual que el externo pero para estructura INTERNA. También es la base de los pivotes de liquidez (sección 2).")
+i_confirmMode   = input.string("Cierre de cuerpo", "Confirmación de ruptura (BOS/MSS)", options = ["Cierre de cuerpo", "Mecha"], group = grpMS)
+i_showStructure = input.bool(true, "Mostrar niveles de estructura (líneas)", group = grpMS)
+i_showExtLabels = input.bool(true, "Mostrar etiquetas BOS/MSS externas", group = grpMS)
+i_showIntLabels = input.bool(false, "Mostrar etiquetas BOS/MSS internas (puede saturar el gráfico)", group = grpMS)
+
+useBodyClose = i_confirmMode == "Cierre de cuerpo"
+
+// ---- 2. LIQUIDITY SWEEP ----
+grpLQ = "2. Liquidity Sweep"
+i_liqLookback      = input.int(150, "Lookback de liquidez activa (barras)", minval = 10, group = grpLQ, tooltip = "Barras que un pivote interno permanece como liquidez 'activa' (no barrida) antes de descartarse por antigüedad.")
+i_eqTolPct         = input.float(0.05, "Tolerancia Equal High/Low (%)", minval = 0.0, step = 0.01, group = grpLQ)
+i_eqMaxBars        = input.int(200, "Distancia máxima entre niveles para Equal H/L (barras)", minval = 1, group = grpLQ)
+i_sweepConfirmMode = input.string("Cierre", "Confirmación del Sweep", options = ["Cierre", "Desplazamiento"], group = grpLQ)
+i_sweepConfirmBars = input.int(3, "Barras máximas para confirmar el Sweep", minval = 1, group = grpLQ)
+i_sweepDispFactor  = input.float(1.0, "Desplazamiento mínimo (x ATR) - modo Desplazamiento", minval = 0.0, step = 0.1, group = grpLQ)
+i_showLiquidity    = input.bool(true, "Mostrar barridos y Equal High/Low", group = grpLQ)
+
+// ---- 3. MSS CONFIRMED ----
+grpMSS = "3. MSS Confirmed"
+i_mssLookbackBars = input.int(30, "Barras máximas entre el Sweep y el MSS", minval = 1, group = grpMSS)
+i_mssMinDispATR   = input.float(0.0, "Desplazamiento mínimo para validar MSS (x ATR, 0 = sin filtro)", minval = 0.0, step = 0.1, group = grpMSS)
+
+// ---- 4. EQUILIBRIUM ----
+grpEQ = "4. Equilibrium"
+i_eqSource        = input.string("Swing Externo", "Dealing Range usado para Equilibrium", options = ["Swing Externo", "Swing Interno", "Último válido", "Manual"], group = grpEQ)
+i_manualHigh      = input.float(na, "Manual: High del rango", group = grpEQ)
+i_manualLow       = input.float(na, "Manual: Low del rango", group = grpEQ)
+i_showEquilibrium = input.bool(true, "Mostrar línea de Equilibrium (50%)", group = grpEQ)
+
+// ---- 5. GENERAL / DEBUG FASE 1 ----
+grpGEN           = "5. General / Debug Fase 1"
+i_atrLen         = input.int(14, "Longitud ATR (usado en filtros de desplazamiento)", minval = 1, group = grpGEN)
+i_showDebugPanel = input.bool(true, "Mostrar panel de debug de Fase 1", group = grpGEN)
+
+
+// =====================================================================================================
+// UTILIDADES
+// =====================================================================================================
+atrVal = ta.atr(i_atrLen)
+
+biasText(int _b) =>
+    string _t = _b == 1 ? "Bullish" : _b == -1 ? "Bearish" : "Neutral"
+    _t
+
+biasColor(int _b) =>
+    color _c = _b == 1 ? color.new(color.teal, 0) : _b == -1 ? color.new(color.red, 0) : color.new(color.gray, 0)
+    _c
+
+// Función pura: determina si el nivel alto/bajo vigente fue roto en esta barra.
+// No usa 'var' interno -> es segura de reutilizar para estructura externa e interna sin mezclar estado.
+f_checkBreak(float _highLevel, float _lowLevel, bool _useBodyClose) =>
+    bool _brokeUp   = not na(_highLevel) and (_useBodyClose ? close > _highLevel : high > _highLevel)
+    bool _brokeDown = not na(_lowLevel)  and (_useBodyClose ? close < _lowLevel  : low  < _lowLevel)
+    [_brokeUp, _brokeDown]
+
+
+// =====================================================================================================
+// PIVOTES (no repintan una vez confirmados; se confirman con 'len' barras de rezago)
+// =====================================================================================================
+float ph_ext = ta.pivothigh(i_extLen, i_extLen)
+float pl_ext = ta.pivotlow(i_extLen, i_extLen)
+float ph_int = ta.pivothigh(i_intLen, i_intLen)
+float pl_int = ta.pivotlow(i_intLen, i_intLen)
+
+
+// =====================================================================================================
+// ESTADO PERSISTENTE
+// =====================================================================================================
+// ---- Estructura externa ----
+var float extHighLevel      = na   // nivel externo activo (sin romper) a vigilar al alza
+var float extLowLevel       = na   // nivel externo activo (sin romper) a vigilar a la baja
+var int   extBias           = 0    // 1 Bullish, -1 Bearish, 0 Neutral
+var float lastExtPivotHigh  = na   // último pivote externo confirmado (para Equilibrium), sin importar si fue roto
+var float lastExtPivotLow   = na
+var int   lastExtPivotHighBar = na
+var int   lastExtPivotLowBar  = na
+
+// ---- Estructura interna ----
+var float intHighLevel      = na
+var float intLowLevel       = na
+var int   intBias           = 0
+var float lastIntPivotHigh  = na
+var float lastIntPivotLow   = na
+var int   lastIntPivotHighBar = na
+var int   lastIntPivotLowBar  = na
+
+// ---- Liquidez (pools basados en pivotes internos) ----
+var array<float> liqHighLevels = array.new<float>()
+var array<int>   liqHighBars   = array.new<int>()
+var array<float> liqLowLevels  = array.new<float>()
+var array<int>   liqLowBars    = array.new<int>()
+
+var float pendingBSLLevel    = na   // high barrido (buy-side liquidity) esperando confirmación bajista
+var int   pendingBSLDeadline = na
+var float pendingBSLPrice    = na   // extremo (high) alcanzado en el barrido, para la etiqueta
+
+var float pendingSSLLevel    = na   // low barrido (sell-side liquidity) esperando confirmación alcista
+var int   pendingSSLDeadline = na
+var float pendingSSLPrice    = na
+
+var int lastBSLSweepBar = na   // última barra donde se CONFIRMÓ un sweep de buy-side liquidity (highs)
+var int lastSSLSweepBar = na   // última barra donde se CONFIRMÓ un sweep de sell-side liquidity (lows)
+var int lastEQHBar      = na   // última barra donde se detectó un Equal High
+var int lastEQLBar      = na
+
+// ---- MSS Confirmed ----
+var int lastMSSConfirmedBullBar = na
+var int lastMSSConfirmedBearBar = na
+
+
+// =====================================================================================================
+// LÓGICA PRINCIPAL - se evalúa únicamente al CIERRE confirmado de cada vela (no repinta).
+// Mientras la vela está en formación, el panel y las etiquetas conservan el último estado confirmado.
+// =====================================================================================================
+bool extBOSUp   = false
+bool extBOSDown = false
+bool extMSSUp   = false
+bool extMSSDown = false
+bool intBOSUp   = false
+bool intBOSDown = false
+bool intMSSUp   = false
+bool intMSSDown = false
+
+if barstate.isconfirmed
+    // ---------------- 1a. ESTRUCTURA EXTERNA ----------------
+    [brokeUpExt, brokeDownExt] = f_checkBreak(extHighLevel, extLowLevel, useBodyClose)
+
+    if brokeUpExt
+        extMSSUp     := extBias == -1
+        extBOSUp     := not extMSSUp
+        extBias      := 1
+        extHighLevel := na
+    if brokeDownExt
+        extMSSDown   := extBias == 1
+        extBOSDown   := not extMSSDown
+        extBias      := -1
+        extLowLevel  := na
+
+    if not na(ph_ext)
+        extHighLevel        := ph_ext
+        lastExtPivotHigh     := ph_ext
+        lastExtPivotHighBar  := bar_index - i_extLen
+    if not na(pl_ext)
+        extLowLevel         := pl_ext
+        lastExtPivotLow      := pl_ext
+        lastExtPivotLowBar   := bar_index - i_extLen
+
+    // ---------------- 1b. ESTRUCTURA INTERNA ----------------
+    [brokeUpInt, brokeDownInt] = f_checkBreak(intHighLevel, intLowLevel, useBodyClose)
+
+    if brokeUpInt
+        intMSSUp     := intBias == -1
+        intBOSUp     := not intMSSUp
+        intBias      := 1
+        intHighLevel := na
+    if brokeDownInt
+        intMSSDown   := intBias == 1
+        intBOSDown   := not intMSSDown
+        intBias      := -1
+        intLowLevel  := na
+
+    if not na(ph_int)
+        intHighLevel        := ph_int
+        lastIntPivotHigh     := ph_int
+        lastIntPivotHighBar  := bar_index - i_intLen
+        int pivotBarH = bar_index - i_intLen
+        // Equal High: comparar el nuevo pivote contra los niveles de liquidez ya existentes.
+        int lastIdxH0 = array.size(liqHighLevels) - 1
+        if lastIdxH0 >= 0
+            for i = lastIdxH0 to 0
+                float lvl = array.get(liqHighLevels, i)
+                int   lb  = array.get(liqHighBars, i)
+                if math.abs(ph_int - lvl) / lvl * 100 <= i_eqTolPct and (pivotBarH - lb) <= i_eqMaxBars
+                    lastEQHBar := bar_index
+        array.push(liqHighLevels, ph_int)
+        array.push(liqHighBars, pivotBarH)
+
+    if not na(pl_int)
+        intLowLevel         := pl_int
+        lastIntPivotLow      := pl_int
+        lastIntPivotLowBar   := bar_index - i_intLen
+        int pivotBarL = bar_index - i_intLen
+        int lastIdxL0 = array.size(liqLowLevels) - 1
+        if lastIdxL0 >= 0
+            for i = lastIdxL0 to 0
+                float lvl = array.get(liqLowLevels, i)
+                int   lb  = array.get(liqLowBars, i)
+                if math.abs(pl_int - lvl) / lvl * 100 <= i_eqTolPct and (pivotBarL - lb) <= i_eqMaxBars
+                    lastEQLBar := bar_index
+        array.push(liqLowLevels, pl_int)
+        array.push(liqLowBars, pivotBarL)
+
+    // ---------------- 2a. PODAR Y DETECTAR NUEVOS BARRIDOS SOBRE LOS POOLS ----------------
+    int lastIdxH = array.size(liqHighLevels) - 1
+    float raidedHigh = na
+    if lastIdxH >= 0
+        for i = lastIdxH to 0
+            float lvl = array.get(liqHighLevels, i)
+            int   lb  = array.get(liqHighBars, i)
+            bool tooOld = (bar_index - lb) > i_liqLookback
+            bool raided = high > lvl
+            if tooOld or raided
+                if raided
+                    raidedHigh := na(raidedHigh) ? lvl : math.max(raidedHigh, lvl)
+                array.remove(liqHighLevels, i)
+                array.remove(liqHighBars, i)
+    if not na(raidedHigh) and (na(pendingBSLLevel) or raidedHigh > pendingBSLLevel)
+        pendingBSLLevel    := raidedHigh
+        pendingBSLDeadline := bar_index + i_sweepConfirmBars
+        pendingBSLPrice    := high
+
+    int lastIdxL = array.size(liqLowLevels) - 1
+    float raidedLow = na
+    if lastIdxL >= 0
+        for i = lastIdxL to 0
+            float lvl = array.get(liqLowLevels, i)
+            int   lb  = array.get(liqLowBars, i)
+            bool tooOld = (bar_index - lb) > i_liqLookback
+            bool raided = low < lvl
+            if tooOld or raided
+                if raided
+                    raidedLow := na(raidedLow) ? lvl : math.min(raidedLow, lvl)
+                array.remove(liqLowLevels, i)
+                array.remove(liqLowBars, i)
+    if not na(raidedLow) and (na(pendingSSLLevel) or raidedLow < pendingSSLLevel)
+        pendingSSLLevel    := raidedLow
+        pendingSSLDeadline := bar_index + i_sweepConfirmBars
+        pendingSSLPrice    := low
+
+    // ---------------- 2b. RESOLVER SWEEP PENDIENTE (con el cierre de ESTA barra; permite confirmar
+    //                      en la misma vela del barrido, el patrón clásico de sweep-and-reject) ----------------
+    if not na(pendingBSLLevel)
+        if bar_index > pendingBSLDeadline
+            pendingBSLLevel    := na
+            pendingBSLDeadline := na
+        else
+            bool dispOkBear   = not na(atrVal) and (open - close) >= i_sweepDispFactor * atrVal
+            bool confirmedBSL = i_sweepConfirmMode == "Cierre" ? close < pendingBSLLevel : (close < pendingBSLLevel and dispOkBear)
+            if confirmedBSL
+                lastBSLSweepBar    := bar_index
+                pendingBSLLevel    := na
+                pendingBSLDeadline := na
+
+    if not na(pendingSSLLevel)
+        if bar_index > pendingSSLDeadline
+            pendingSSLLevel    := na
+            pendingSSLDeadline := na
+        else
+            bool dispOkBull   = not na(atrVal) and (close - open) >= i_sweepDispFactor * atrVal
+            bool confirmedSSL = i_sweepConfirmMode == "Cierre" ? close > pendingSSLLevel : (close > pendingSSLLevel and dispOkBull)
+            if confirmedSSL
+                lastSSLSweepBar    := bar_index
+                pendingSSLLevel    := na
+                pendingSSLDeadline := na
+
+    // ---------------- 3. MSS CONFIRMED (gate: MSS interno + Sweep previo en la ventana) ----------------
+    bool dispCandleBull = not na(atrVal) and (close - open) >= i_mssMinDispATR * atrVal
+    bool dispCandleBear = not na(atrVal) and (open - close) >= i_mssMinDispATR * atrVal
+
+    if intMSSUp and not na(lastSSLSweepBar) and (bar_index - lastSSLSweepBar) <= i_mssLookbackBars and dispCandleBull
+        lastMSSConfirmedBullBar := bar_index
+    if intMSSDown and not na(lastBSLSweepBar) and (bar_index - lastBSLSweepBar) <= i_mssLookbackBars and dispCandleBear
+        lastMSSConfirmedBearBar := bar_index
+
+
+// =====================================================================================================
+// 4. EQUILIBRIUM (lectura continua: no necesita esperar el cierre, es un nivel ya fijado)
+// =====================================================================================================
+float rangeHigh = na
+float rangeLow  = na
+
+if i_eqSource == "Swing Externo"
+    rangeHigh := lastExtPivotHigh
+    rangeLow  := lastExtPivotLow
+else if i_eqSource == "Swing Interno"
+    rangeHigh := lastIntPivotHigh
+    rangeLow  := lastIntPivotLow
+else if i_eqSource == "Último válido"
+    rangeHigh := nz(lastExtPivotHighBar, -1) >= nz(lastIntPivotHighBar, -1) ? lastExtPivotHigh : lastIntPivotHigh
+    rangeLow  := nz(lastExtPivotLowBar, -1)  >= nz(lastIntPivotLowBar, -1)  ? lastExtPivotLow  : lastIntPivotLow
+else
+    rangeHigh := i_manualHigh
+    rangeLow  := i_manualLow
+
+float eqLevel = (not na(rangeHigh) and not na(rangeLow)) ? (rangeHigh + rangeLow) / 2 : na
+bool isPremium  = not na(eqLevel) and close > eqLevel
+bool isDiscount = not na(eqLevel) and close < eqLevel
+
+
+// =====================================================================================================
+// VISUAL - NIVELES (se dibujan como plots que se cortan cuando el valor pasa a na, sin gestionar objetos)
+// =====================================================================================================
+plot(i_showStructure ? extHighLevel : na, "External High Level", color.new(color.lime, 0), 1, plot.style_linebr)
+plot(i_showStructure ? extLowLevel  : na, "External Low Level",  color.new(color.red,  0), 1, plot.style_linebr)
+plot(i_showStructure ? intHighLevel : na, "Internal High Level", color.new(color.lime, 60), 1, plot.style_linebr)
+plot(i_showStructure ? intLowLevel  : na, "Internal Low Level",  color.new(color.red,  60), 1, plot.style_linebr)
+plot(i_showEquilibrium ? eqLevel : na, "Equilibrium (50%)", color.new(color.yellow, 0), 1, plot.style_circles)
+
+
+// =====================================================================================================
+// VISUAL - ETIQUETAS DE EVENTOS (solo se dibujan al cierre confirmado -> sin parpadeo ni duplicados)
+// =====================================================================================================
+if barstate.isconfirmed
+    if i_showExtLabels
+        if extBOSUp
+            label.new(bar_index, high, "BOS", style = label.style_label_down, color = color.new(color.teal, 0), textcolor = color.white, size = size.tiny)
+        if extMSSUp
+            label.new(bar_index, high, "MSS", style = label.style_label_down, color = color.new(color.blue, 0), textcolor = color.white, size = size.tiny)
+        if extBOSDown
+            label.new(bar_index, low, "BOS", style = label.style_label_up, color = color.new(color.maroon, 0), textcolor = color.white, size = size.tiny)
+        if extMSSDown
+            label.new(bar_index, low, "MSS", style = label.style_label_up, color = color.new(color.purple, 0), textcolor = color.white, size = size.tiny)
+
+    if i_showIntLabels
+        if intBOSUp
+            label.new(bar_index, high, "bos", style = label.style_label_down, color = color.new(color.teal, 70), textcolor = color.white, size = size.tiny)
+        if intMSSUp
+            label.new(bar_index, high, "mss", style = label.style_label_down, color = color.new(color.blue, 70), textcolor = color.white, size = size.tiny)
+        if intBOSDown
+            label.new(bar_index, low, "bos", style = label.style_label_up, color = color.new(color.maroon, 70), textcolor = color.white, size = size.tiny)
+        if intMSSDown
+            label.new(bar_index, low, "mss", style = label.style_label_up, color = color.new(color.purple, 70), textcolor = color.white, size = size.tiny)
+
+    if i_showLiquidity
+        if lastBSLSweepBar == bar_index
+            label.new(bar_index, pendingBSLPrice, "SWEEP", style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.tiny)
+        if lastSSLSweepBar == bar_index
+            label.new(bar_index, pendingSSLPrice, "SWEEP", style = label.style_label_up, color = color.new(color.orange, 0), textcolor = color.black, size = size.tiny)
+        if lastEQHBar == bar_index
+            label.new(bar_index, high, "EQH", style = label.style_label_down, color = color.new(color.fuchsia, 0), textcolor = color.white, size = size.tiny)
+        if lastEQLBar == bar_index
+            label.new(bar_index, low, "EQL", style = label.style_label_up, color = color.new(color.fuchsia, 0), textcolor = color.white, size = size.tiny)
+
+    if lastMSSConfirmedBullBar == bar_index
+        label.new(bar_index, low, "MSS CONFIRMED", style = label.style_label_up, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+    if lastMSSConfirmedBearBar == bar_index
+        label.new(bar_index, high, "MSS CONFIRMED", style = label.style_label_down, color = color.new(color.maroon, 0), textcolor = color.white, size = size.small)
+
+
+// =====================================================================================================
+// PANEL DE DEBUG - FASE 1 (solo verificación visual; el checklist final llega en la Fase 4)
+// =====================================================================================================
+var table debugTable = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.gray)
+
+if i_showDebugPanel and barstate.islast
+    table.cell(debugTable, 0, 0, "FASE 1 - DEBUG", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(debugTable, 1, 0, "", bgcolor = color.new(color.blue, 30))
+
+    table.cell(debugTable, 0, 1, "Bias Externo", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 1, biasText(extBias), text_color = biasColor(extBias), text_size = size.small)
+
+    table.cell(debugTable, 0, 2, "Bias Interno", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 2, biasText(intBias), text_color = biasColor(intBias), text_size = size.small)
+
+    string eqhlTxt = (na(lastEQHBar) ? "" : "EQH hace " + str.tostring(bar_index - lastEQHBar) + "b ") + (na(lastEQLBar) ? "" : "EQL hace " + str.tostring(bar_index - lastEQLBar) + "b")
+    table.cell(debugTable, 0, 3, "Equal High/Low", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 3, eqhlTxt == "" ? "-" : eqhlTxt, text_color = color.fuchsia, text_size = size.small)
+
+    string sweepTxt = na(lastBSLSweepBar) and na(lastSSLSweepBar) ? "-" : (nz(lastBSLSweepBar, -1) > nz(lastSSLSweepBar, -1) ? "BSL (bajista) hace " + str.tostring(bar_index - lastBSLSweepBar) + "b" : "SSL (alcista) hace " + str.tostring(bar_index - lastSSLSweepBar) + "b")
+    table.cell(debugTable, 0, 4, "Último Sweep", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 4, sweepTxt, text_color = color.orange, text_size = size.small)
+
+    string mssTxt = na(lastMSSConfirmedBullBar) and na(lastMSSConfirmedBearBar) ? "-" : (nz(lastMSSConfirmedBullBar, -1) > nz(lastMSSConfirmedBearBar, -1) ? "BULLISH hace " + str.tostring(bar_index - lastMSSConfirmedBullBar) + "b" : "BEARISH hace " + str.tostring(bar_index - lastMSSConfirmedBearBar) + "b")
+    table.cell(debugTable, 0, 5, "MSS Confirmed", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 5, mssTxt, text_color = color.aqua, text_size = size.small)
+
+    string eqTxt = na(eqLevel) ? "Sin rango valido" : isPremium ? "PREMIUM" : isDiscount ? "DISCOUNT" : "EN EQ (50%)"
+    table.cell(debugTable, 0, 6, "Equilibrium", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 6, eqTxt, text_color = isPremium ? color.red : isDiscount ? color.lime : color.white, text_size = size.small)
+
+    table.cell(debugTable, 0, 7, "Rango usado", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 7, i_eqSource, text_color = color.gray, text_size = size.small)
