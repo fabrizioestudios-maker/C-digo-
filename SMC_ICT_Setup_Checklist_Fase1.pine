@@ -14,9 +14,14 @@ indicator("SMC/ICT Setup Checklist [TLAB] - Fase 1", shorttitle = "SMC Checklist
 //  - Liquidity Sweep = el precio toma (wick) un pivote interno (o pool de Equal High/Low) y luego
 //    CONFIRMA en contra, por cierre o por desplazamiento (vela con cuerpo >= factor x ATR), dentro de
 //    un número máximo de barras configurable.
-//  - MSS Confirmed = un MSS interno cuya ruptura ocurre dentro de un número máximo de barras después
-//    de un Liquidity Sweep en la dirección correspondiente (SSL swept -> MSS alcista / BSL swept ->
-//    MSS bajista), con un filtro opcional de desplazamiento mínimo.
+//  - MSS Confirmed = cuando un Liquidity Sweep CONFIRMA, se congela como "trigger" exclusivo de ese
+//    sweep el Internal High/Low vigente en ese instante (si no hay ninguno activo, se adopta el primer
+//    Internal High/Low que se forme después, dentro de la misma ventana). MSS Confirmed = TRUE cuando el
+//    precio rompe ESE nivel congelado (mismo método de confirmación, cierre o mecha) antes de que venza
+//    la ventana de barras configurada, con el filtro opcional de desplazamiento mínimo corregido para que
+//    0 = sin filtro real (no "cuerpo >= 0"). Un nuevo sweep en la misma dirección reemplaza al candidato
+//    anterior. Esto es independiente del BOS/MSS estructural genérico de la sección 1 (que sigue
+//    existiendo solo como lectura de contexto de estructura, no dispara MSS Confirmed por sí solo).
 //  - Equilibrium = 50% del rango entre el pivote alto y bajo de la fuente de dealing range elegida.
 // #####################################################################################################
 
@@ -54,8 +59,8 @@ i_mssMinDispATR   = input.float(0.0, "Desplazamiento mínimo para validar MSS (x
 // ---- 4. EQUILIBRIUM ----
 grpEQ = "4. Equilibrium"
 i_eqSource        = input.string("Swing Externo", "Dealing Range usado para Equilibrium", options = ["Swing Externo", "Swing Interno", "Último válido", "Manual"], group = grpEQ)
-i_manualHigh      = input.float(0.0, "Manual: High del rango", group = grpEQ)
-i_manualLow       = input.float(0.0, "Manual: Low del rango", group = grpEQ)
+i_manualHigh      = input.float(0.0, "Manual: High del rango (0 = sin definir)", minval = 0.0, group = grpEQ)
+i_manualLow       = input.float(0.0, "Manual: Low del rango (0 = sin definir)", minval = 0.0, group = grpEQ)
 i_showEquilibrium = input.bool(true, "Mostrar línea de Equilibrium (50%)", group = grpEQ)
 
 // ---- 5. GENERAL / DEBUG FASE 1 ----
@@ -138,6 +143,16 @@ var int lastEQLBar      = na
 var int lastMSSConfirmedBullBar = na
 var int lastMSSConfirmedBearBar = na
 
+// Candidato de MSS Confirmed: nivel congelado en el momento del sweep, asociado exclusivamente a ESE
+// sweep (no a "cualquier sweep reciente"). Un nuevo sweep en la misma dirección reemplaza al candidato.
+var float bullCandTrigger  = na   // Internal High congelado que debe romper el sweep de SSL para confirmar
+var int   bullCandSweepBar = na   // barra del sweep que originó este candidato
+var int   bullCandDeadline = na
+
+var float bearCandTrigger  = na   // Internal Low congelado que debe romper el sweep de BSL para confirmar
+var int   bearCandSweepBar = na
+var int   bearCandDeadline = na
+
 
 // =====================================================================================================
 // LÓGICA PRINCIPAL - se evalúa únicamente al CIERRE confirmado de cada vela (no repinta).
@@ -201,7 +216,7 @@ if barstate.isconfirmed
             for i = lastIdxH0 to 0
                 float lvl = array.get(liqHighLevels, i)
                 int   lb  = array.get(liqHighBars, i)
-                if math.abs(ph_int - lvl) / lvl * 100 <= i_eqTolPct and (pivotBarH - lb) <= i_eqMaxBars
+                if lvl > 0 and math.abs(ph_int - lvl) / lvl * 100 <= i_eqTolPct and (pivotBarH - lb) <= i_eqMaxBars
                     lastEQHBar := bar_index
         array.push(liqHighLevels, ph_int)
         array.push(liqHighBars, pivotBarH)
@@ -216,7 +231,7 @@ if barstate.isconfirmed
             for i = lastIdxL0 to 0
                 float lvl = array.get(liqLowLevels, i)
                 int   lb  = array.get(liqLowBars, i)
-                if math.abs(pl_int - lvl) / lvl * 100 <= i_eqTolPct and (pivotBarL - lb) <= i_eqMaxBars
+                if lvl > 0 and math.abs(pl_int - lvl) / lvl * 100 <= i_eqTolPct and (pivotBarL - lb) <= i_eqMaxBars
                     lastEQLBar := bar_index
         array.push(liqLowLevels, pl_int)
         array.push(liqLowBars, pivotBarL)
@@ -265,7 +280,7 @@ if barstate.isconfirmed
             pendingBSLLevel    := na
             pendingBSLDeadline := na
         else
-            bool dispOkBear   = not na(atrVal) and (open - close) >= i_sweepDispFactor * atrVal
+            bool dispOkBear   = i_sweepDispFactor <= 0 or (not na(atrVal) and (open - close) >= i_sweepDispFactor * atrVal)
             bool confirmedBSL = i_sweepConfirmMode == "Cierre" ? close < pendingBSLLevel : (close < pendingBSLLevel and dispOkBear)
             if confirmedBSL
                 lastBSLSweepBar    := bar_index
@@ -277,21 +292,64 @@ if barstate.isconfirmed
             pendingSSLLevel    := na
             pendingSSLDeadline := na
         else
-            bool dispOkBull   = not na(atrVal) and (close - open) >= i_sweepDispFactor * atrVal
+            bool dispOkBull   = i_sweepDispFactor <= 0 or (not na(atrVal) and (close - open) >= i_sweepDispFactor * atrVal)
             bool confirmedSSL = i_sweepConfirmMode == "Cierre" ? close > pendingSSLLevel : (close > pendingSSLLevel and dispOkBull)
             if confirmedSSL
                 lastSSLSweepBar    := bar_index
                 pendingSSLLevel    := na
                 pendingSSLDeadline := na
 
-    // ---------------- 3. MSS CONFIRMED (gate: MSS interno + Sweep previo en la ventana) ----------------
-    bool dispCandleBull = not na(atrVal) and (close - open) >= i_mssMinDispATR * atrVal
-    bool dispCandleBear = not na(atrVal) and (open - close) >= i_mssMinDispATR * atrVal
+    // ---------------- 3. MSS CONFIRMED (candidato con nivel congelado, asociado 1:1 al sweep que lo originó) --
+    // 3a. Si HOY se confirmó un sweep (ver 2b), (re)arma el candidato de esa dirección: congela el
+    //     Internal High/Low vigente en este instante. Un sweep nuevo en la misma dirección SIEMPRE
+    //     reemplaza al candidato anterior (nueva barra de origen, nuevo nivel, nuevo vencimiento), así
+    //     que no puede quedar "contaminado" por un sweep más viejo de la misma dirección. Un sweep de la
+    //     dirección opuesta NO cancela el candidato vigente (ver explicación en el chat).
+    if lastSSLSweepBar == bar_index
+        bullCandTrigger  := intHighLevel
+        bullCandSweepBar := bar_index
+        bullCandDeadline := bar_index + i_mssLookbackBars
+    if lastBSLSweepBar == bar_index
+        bearCandTrigger  := intLowLevel
+        bearCandSweepBar := bar_index
+        bearCandDeadline := bar_index + i_mssLookbackBars
 
-    if intMSSUp and not na(lastSSLSweepBar) and (bar_index - lastSSLSweepBar) <= i_mssLookbackBars and dispCandleBull
-        lastMSSConfirmedBullBar := bar_index
-    if intMSSDown and not na(lastBSLSweepBar) and (bar_index - lastBSLSweepBar) <= i_mssLookbackBars and dispCandleBear
-        lastMSSConfirmedBearBar := bar_index
+    // 3b. Si el candidato quedó armado sin nivel (no había Internal High/Low activo en ese instante),
+    //     adopta el primero que se forme después, sin mover la barra de origen ni el vencimiento.
+    if not na(bullCandSweepBar) and na(bullCandTrigger) and not na(intHighLevel)
+        bullCandTrigger := intHighLevel
+    if not na(bearCandSweepBar) and na(bearCandTrigger) and not na(intLowLevel)
+        bearCandTrigger := intLowLevel
+
+    // 3c. Resolver: expira por tiempo, o el precio rompe ESE nivel congelado (mismo método de
+    //     confirmación que BOS/MSS) con el filtro de desplazamiento opcional (0 = sin filtro real).
+    if not na(bullCandSweepBar)
+        if bar_index > bullCandDeadline
+            bullCandTrigger  := na
+            bullCandSweepBar := na
+            bullCandDeadline := na
+        else if not na(bullCandTrigger)
+            [candBreakUp, candBreakUpUnused] = f_checkBreak(bullCandTrigger, na, useBodyClose)
+            bool dispOkMSSBull = i_mssMinDispATR <= 0 or (not na(atrVal) and (close - open) >= i_mssMinDispATR * atrVal)
+            if candBreakUp and dispOkMSSBull
+                lastMSSConfirmedBullBar := bar_index
+                bullCandTrigger  := na
+                bullCandSweepBar := na
+                bullCandDeadline := na
+
+    if not na(bearCandSweepBar)
+        if bar_index > bearCandDeadline
+            bearCandTrigger  := na
+            bearCandSweepBar := na
+            bearCandDeadline := na
+        else if not na(bearCandTrigger)
+            [candBreakDownUnused, candBreakDown] = f_checkBreak(na, bearCandTrigger, useBodyClose)
+            bool dispOkMSSBear = i_mssMinDispATR <= 0 or (not na(atrVal) and (open - close) >= i_mssMinDispATR * atrVal)
+            if candBreakDown and dispOkMSSBear
+                lastMSSConfirmedBearBar := bar_index
+                bearCandTrigger  := na
+                bearCandSweepBar := na
+                bearCandDeadline := na
 
 
 // =====================================================================================================
@@ -310,8 +368,8 @@ else if i_eqSource == "Último válido"
     rangeHigh := nz(lastExtPivotHighBar, -1) >= nz(lastIntPivotHighBar, -1) ? lastExtPivotHigh : lastIntPivotHigh
     rangeLow  := nz(lastExtPivotLowBar, -1)  >= nz(lastIntPivotLowBar, -1)  ? lastExtPivotLow  : lastIntPivotLow
 else
-    rangeHigh := i_manualHigh
-    rangeLow  := i_manualLow
+    rangeHigh := i_manualHigh > 0 ? i_manualHigh : na
+    rangeLow  := i_manualLow  > 0 ? i_manualLow  : na
 
 float eqLevel = (not na(rangeHigh) and not na(rangeLow)) ? (rangeHigh + rangeLow) / 2 : na
 bool isPremium  = not na(eqLevel) and close > eqLevel
@@ -371,7 +429,7 @@ if barstate.isconfirmed
 // =====================================================================================================
 // PANEL DE DEBUG - FASE 1 (solo verificación visual; el checklist final llega en la Fase 4)
 // =====================================================================================================
-var table debugTable = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.gray)
+var table debugTable = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.gray)
 
 if i_showDebugPanel and barstate.islast
     table.cell(debugTable, 0, 0, "FASE 1 - DEBUG", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
@@ -395,9 +453,13 @@ if i_showDebugPanel and barstate.islast
     table.cell(debugTable, 0, 5, "MSS Confirmed", text_color = color.white, text_size = size.small)
     table.cell(debugTable, 1, 5, mssTxt, text_color = color.aqua, text_size = size.small)
 
-    string eqTxt = na(eqLevel) ? "Sin rango valido" : isPremium ? "PREMIUM" : isDiscount ? "DISCOUNT" : "EN EQ (50%)"
-    table.cell(debugTable, 0, 6, "Equilibrium", text_color = color.white, text_size = size.small)
-    table.cell(debugTable, 1, 6, eqTxt, text_color = isPremium ? color.red : isDiscount ? color.lime : color.white, text_size = size.small)
+    string candTxt = not na(bullCandTrigger) ? "Alcista > " + str.tostring(bullCandTrigger, format.mintick) + " (vence " + str.tostring(bullCandDeadline - bar_index) + "b)" : not na(bearCandTrigger) ? "Bajista < " + str.tostring(bearCandTrigger, format.mintick) + " (vence " + str.tostring(bearCandDeadline - bar_index) + "b)" : (not na(bullCandSweepBar) or not na(bearCandSweepBar)) ? "Esperando nivel interno..." : "-"
+    table.cell(debugTable, 0, 6, "Candidato MSS", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 6, candTxt, text_color = color.yellow, text_size = size.small)
 
-    table.cell(debugTable, 0, 7, "Rango usado", text_color = color.white, text_size = size.small)
-    table.cell(debugTable, 1, 7, i_eqSource, text_color = color.gray, text_size = size.small)
+    string eqTxt = na(eqLevel) ? "Sin rango valido" : isPremium ? "PREMIUM" : isDiscount ? "DISCOUNT" : "EN EQ (50%)"
+    table.cell(debugTable, 0, 7, "Equilibrium", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 7, eqTxt, text_color = isPremium ? color.red : isDiscount ? color.lime : color.white, text_size = size.small)
+
+    table.cell(debugTable, 0, 8, "Rango usado", text_color = color.white, text_size = size.small)
+    table.cell(debugTable, 1, 8, i_eqSource, text_color = color.gray, text_size = size.small)
