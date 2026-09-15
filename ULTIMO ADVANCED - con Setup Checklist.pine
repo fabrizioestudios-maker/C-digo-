@@ -33,22 +33,6 @@ deleteLine(line _line, label _label) =>
 getLineStyle(lineOption) =>
     lineOption == "─" ? line.style_solid : lineOption == "┄" ? line.style_dotted : line.style_dashed
 
-get_structure_highest_bar(lookback) =>
-    var int idx = 0
-    maxBar = bar_index > lookback ? ta.highestbars(high, lookback) : ta.highestbars(high, bar_index + 1)
-    for i = 0 to lookback - 1 by 1
-        if high[i+1] > high[i+2] and high[i] <= high[i+1] and ((i+1) * -1) >= maxBar
-            idx := (i+1) * -1
-    idx := idx == 0 ? maxBar : idx 
-
-get_structure_lowest_bar(lookback) =>
-    var int idx = 0
-    minBar = bar_index > lookback ? ta.lowestbars(low, lookback) : ta.lowestbars(low, bar_index + 1)
-    for i = 0 to lookback - 1 by 1
-        if low[i+1] < low[i+2] and low[i] >= low[i+1] and ((i+1) * -1) >= minBar
-            idx := (i+1) * -1
-    idx := idx == 0 ? minBar : idx 
-
 // ============================================
 // PART 1: FAIR VALUE GAPS (FVG)
 // ============================================
@@ -64,51 +48,54 @@ var array<box> fvgBoxes = array.new_box(0)
 var array<bool> fvgTypes = array.new_bool(0)
 var array<label> fvgLabels = array.new_label(0)
 var array<bool> isFvgMitigated = array.new_bool(0)
+var bool fvgMitigatedFlag = false
 
 FVGDraw(_boxes, _fvgTypes, _isFvgMitigated, _fvgLabels) => 
-    for [index, value] in _boxes
-        if array.get(_fvgTypes, index)
-            if low <= box.get_bottom(value)
-                array.remove(_boxes, index)
-                array.remove(_fvgTypes, index)
-                array.remove(_isFvgMitigated, index)
-                label.delete(array.get(_fvgLabels, index))
-                array.remove(_fvgLabels, index)
-                box.delete(value)
-            else 
-                if low < box.get_top(value)
-                    box.set_bgcolor(value, mitigatedFvgColor)
-                    if not array.get(_isFvgMitigated, index)
-                        alert("FVG has been mitigated", alert.freq_once_per_bar)
-                        array.set(_isFvgMitigated, index, true)
-                    if isMitigatedFvgToReduce
-                        box.set_top(value, low)
-                box.set_right(value, bar_index)
-                labelX = int((box.get_left(value) + box.get_right(value)) / 2)
-                labelY = (box.get_top(value) + box.get_bottom(value)) / 2
-                label.set_x(array.get(_fvgLabels, index), labelX)
-                label.set_y(array.get(_fvgLabels, index), labelY)
-        else
-            if high >= box.get_top(value)
-                array.remove(_boxes, index)
-                array.remove(_fvgTypes, index)
-                array.remove(_isFvgMitigated, index)
-                label.delete(array.get(_fvgLabels, index))
-                array.remove(_fvgLabels, index)
-                box.delete(value)
+    if array.size(_boxes) > 0
+        for index = array.size(_boxes) - 1 to 0
+            value = array.get(_boxes, index)
+            if array.get(_fvgTypes, index)
+                if low <= box.get_bottom(value)
+                    array.remove(_boxes, index)
+                    array.remove(_fvgTypes, index)
+                    array.remove(_isFvgMitigated, index)
+                    label.delete(array.get(_fvgLabels, index))
+                    array.remove(_fvgLabels, index)
+                    box.delete(value)
+                else 
+                    if low < box.get_top(value)
+                        box.set_bgcolor(value, mitigatedFvgColor)
+                        if not array.get(_isFvgMitigated, index)
+                            fvgMitigatedFlag := true
+                            array.set(_isFvgMitigated, index, true)
+                        if isMitigatedFvgToReduce
+                            box.set_top(value, low)
+                    box.set_right(value, bar_index)
+                    labelX = int((box.get_left(value) + box.get_right(value)) / 2)
+                    labelY = (box.get_top(value) + box.get_bottom(value)) / 2
+                    label.set_x(array.get(_fvgLabels, index), labelX)
+                    label.set_y(array.get(_fvgLabels, index), labelY)
             else
-                if high > box.get_bottom(value)
-                    box.set_bgcolor(value, mitigatedFvgColor)
-                    if not array.get(_isFvgMitigated, index)
-                        alert("FVG has been mitigated", alert.freq_once_per_bar)
-                        array.set(_isFvgMitigated, index, true)
-                    if isMitigatedFvgToReduce
-                        box.set_bottom(value, high)
-                box.set_right(value, bar_index)
-                labelX = int((box.get_left(value) + box.get_right(value)) / 2)
-                labelY = (box.get_top(value) + box.get_bottom(value)) / 2
-                label.set_x(array.get(_fvgLabels, index), labelX)
-                label.set_y(array.get(_fvgLabels, index), labelY)
+                if high >= box.get_top(value)
+                    array.remove(_boxes, index)
+                    array.remove(_fvgTypes, index)
+                    array.remove(_isFvgMitigated, index)
+                    label.delete(array.get(_fvgLabels, index))
+                    array.remove(_fvgLabels, index)
+                    box.delete(value)
+                else
+                    if high > box.get_bottom(value)
+                        box.set_bgcolor(value, mitigatedFvgColor)
+                        if not array.get(_isFvgMitigated, index)
+                            fvgMitigatedFlag := true
+                            array.set(_isFvgMitigated, index, true)
+                        if isMitigatedFvgToReduce
+                            box.set_bottom(value, high)
+                    box.set_right(value, bar_index)
+                    labelX = int((box.get_left(value) + box.get_right(value)) / 2)
+                    labelY = (box.get_top(value) + box.get_bottom(value)) / 2
+                    label.set_x(array.get(_fvgLabels, index), labelX)
+                    label.set_y(array.get(_fvgLabels, index), labelY)
 
 isBullishFVG = high[3] < low[1]
 isBearishFVG = low[3] > high[1]
@@ -147,7 +134,9 @@ if isBearishFVG and isFvgToShow
         array.remove(fvgTypes, 0)
         array.remove(isFvgMitigated, 0)
 
+fvgMitigatedFlag := false
 FVGDraw(fvgBoxes, fvgTypes, isFvgMitigated, fvgLabels)
+alertcondition(fvgMitigatedFlag, title='FVG Mitigada', message='{{ticker}} FVG mitigada en {{close}}')
 
 /// ============================================
 // PART 2: MARKET STRUCTURES (BOS/CHoCH) - CORREGIDO
@@ -496,7 +485,7 @@ drawMTFLevel(string tf, bool sameAsChart, string styleInput, color lineColor) =>
         lowLevelLine := line.new(na, na, na, na, xloc=xloc.bar_time, color=lineColor, style=convertLineStyle(styleInput))
         lowLevelLabel := label.new(na, na, xloc=xloc.bar_time, text=str.format('P{0}L', tf), color=color(na), textcolor=lineColor, size=size.small, style=label.style_label_left)
 
-if barstate.isrealtime or barstate.isconfirmed
+if barstate.isconfirmed
     array.push(historicHighs, high)
     array.push(historicLows, low)
     array.push(historicTimes, time)
@@ -577,17 +566,18 @@ if bullishSweepConfirmed
     lastBullSweep := bar_index
     line.delete(bullSweepLine)
     bullSweepLine := line.new(lastPivotLowBar, lastPivotLow, bar_index - 3, lastPivotLow, color=bullSweepColor, width=1, style=line.style_dashed)
-    alert('Bullish liquidity sweep', alert.freq_once_per_bar_close)
 
 if bearishSweepConfirmed
     lastBearSweep := bar_index
     line.delete(bearSweepLine)
     bearSweepLine := line.new(lastPivotHighBar, lastPivotHigh, bar_index - 3, lastPivotHigh, color=bearSweepColor, width=1, style=line.style_dashed)
-    alert('Bearish liquidity sweep', alert.freq_once_per_bar_close)
 
 // Plotshapes con toggle
 plotshape(enableSweepSignals and bullishSweepConfirmed, 'SWEEP', location=location.belowbar, color=bullSweepColor, textcolor=bullSweepColor, text='SWEEP', style=shape.triangleup, size=size.tiny, offset=-3)
 plotshape(enableSweepSignals and bearishSweepConfirmed, 'SWEEP', location=location.abovebar, color=bearSweepColor, textcolor=bearSweepColor, text='SWEEP', style=shape.triangledown, size=size.tiny, offset=-3)
+
+alertcondition(bullishSweepConfirmed, title='Bullish Liquidity Sweep', message='{{ticker}} Bullish Liquidity Sweep')
+alertcondition(bearishSweepConfirmed, title='Bearish Liquidity Sweep', message='{{ticker}} Bearish Liquidity Sweep')
 
 // Mostrar niveles de liquidez activos
 if showLiquidityLevels
@@ -637,7 +627,6 @@ if showLiquidityLevels
 // PART 6: VOLUMIZED ORDER BLOCKS
 // ============================================
 
-const bool DEBUG = false
 const int maxBoxesCount = 500
 const float overlapThresholdPercentage = 0
 const int maxDistanceToLastBar = 1750
@@ -647,8 +636,8 @@ showInvalidated = input.bool(true, "Show Historic Zones", group="Order Blocks", 
 OBsEnabled = true
 orderBlockVolumetricInfo = input.bool(true, "Volumetric Info", group="Order Blocks", inline="EV", display=display.none)
 obEndMethod = input.string("Wick", "Zone Invalidation", options=["Wick", "Close"], group="Order Blocks", display=display.none)
-combineOBs = DEBUG ? input.bool(true, "Combine Zones", group="Order Blocks", display=display.none) : true
-maxATRMult = DEBUG ? input.float(3.5, "Max Atr Multiplier", group="Order Blocks") : 3.5
+combineOBs = input.bool(true, "Combine Zones", group="Order Blocks", display=display.none)
+maxATRMult = input.float(3.5, "Max Atr Multiplier", group="Order Blocks")
 swingLength = input.int(50, 'Swing Length', minval=3, tooltip="Swing length is used when finding order block formations. Smaller values will result in finding smaller order blocks.", group="Order Blocks", display=display.none)
 zoneCount = input.string("Low", 'Zone Count', options=["High", "Medium", "Low", "One"], tooltip="Number of Order Block Zones to be rendered. Higher options will result in older Order Blocks shown.", group="Order Blocks", display=display.none)
 bullOrderBlockColor = input(#d9770680, 'Bullish', inline='obColor', group='Order Blocks', display=display.none)
@@ -657,15 +646,15 @@ bearOrderBlockColor = input(#6b728080, 'Bearish', inline='obColor', group='Order
 bullishOrderBlocks = zoneCount == "One" ? 1 : zoneCount == "Low" ? 3 : zoneCount == "Medium" ? 5 : 10
 bearishOrderBlocks = zoneCount == "One" ? 1 : zoneCount == "Low" ? 3 : zoneCount == "Medium" ? 5 : 10
 
-timeframe1Enabled = true
-timeframe1 = ""
+timeframe1Enabled = input.bool(true, "Enable Order Block Timeframe", group = "General Configuration", display = display.none)
+timeframe1 = input.timeframe("", "Order Block Timeframe (vacio = timeframe del grafico)", group = "General Configuration", tooltip = "Dejalo vacio para usar la temporalidad del grafico, o elegi una temporalidad real superior (ej: 15, 60, 240, D) para que los Order Blocks (y el HTF PDA Delivery del Setup Checklist) reflejen una temporalidad efectivamente mas alta.", display = display.none)
 
 textColor = input.color(#ffffff80, "Text Color", group="Order Blocks")
-extendZonesBy = DEBUG ? input.int(15, "Extend Zones", group="Order Blocks", minval=1, maxval=30, inline="ExtendZones") : 15
-extendZonesDynamic = DEBUG ? input.bool(true, "Dynamic", group="Order Blocks", inline="ExtendZones") : true
-combinedText = DEBUG ? input.bool(false, "Combined Text", group="Order Blocks", inline="CombinedColor") : false
-volumeBarsPlace = DEBUG ? input.string("Left", "Show Volume Bars At", options=["Left", "Right"], group="Order Blocks", inline="volumebars") : "Left"
-mirrorVolumeBars = DEBUG ? input.bool(true, "Mirror Volume Bars", group="Order Blocks", inline="volumebars") : true
+extendZonesBy = input.int(15, "Extend Zones", group="Order Blocks", minval=1, maxval=30, inline="ExtendZones")
+extendZonesDynamic = input.bool(true, "Dynamic", group="Order Blocks", inline="ExtendZones")
+combinedText = input.bool(false, "Combined Text", group="Order Blocks", inline="CombinedColor")
+volumeBarsPlace = input.string("Left", "Show Volume Bars At", options=["Left", "Right"], group="Order Blocks", inline="volumebars")
+mirrorVolumeBars = input.bool(true, "Mirror Volume Bars", group="Order Blocks", inline="volumebars")
 
 volumeBarsLeftSide = (volumeBarsPlace == "Left")
 extendZonesByTime = extendZonesBy * timeframe.in_seconds(timeframe.period) * 1000
@@ -1107,6 +1096,11 @@ createPendingSignal(float top, float bottom, string obType) =>
 bullishStructuresAligned = trendDirection == 1 and iTrend == 1
 bearishStructuresAligned = trendDirection == -1 and iTrend == -1
 
+var bool obBuySignalThisBar = false
+var bool obSellSignalThisBar = false
+obBuySignalThisBar := false
+obSellSignalThisBar := false
+
 if enableOBSignals
     // PASO 1: Detectar toques a OBs (sin pintar señal)
     [bullOBIndex, bullOBTop, bullOBBottom] = getPriceInOB("Bull")
@@ -1144,7 +1138,7 @@ if enableOBSignals
                                   color.new(color.black, labels),
                                   labelsize)
                         pending.signalSent := true
-                        alert('COMPRA signal - Structures aligned after OB touch!', alert.freq_once_per_bar)
+                        obBuySignalThisBar := true
                     
                     // SEÑAL DE VENTA: OB bajista tocado + estructuras alineadas bajistas
                     else if pending.obType == "Bear" and bearishStructuresAligned
@@ -1155,7 +1149,7 @@ if enableOBSignals
                                   color.new(color.black, labels),
                                   labelsize)
                         pending.signalSent := true
-                        alert('VENTA signal - Structures aligned after OB touch!', alert.freq_once_per_bar)
+                        obSellSignalThisBar := true
                 
                 else
                     // Expirar señales antiguas sin enviar
@@ -1164,6 +1158,10 @@ if enableOBSignals
                 // Limpiar señales ya enviadas después de 10 barras
                 if bar_index - pending.touchBar > 60
                     pendingSignals.remove(i)
+
+alertcondition(obBuySignalThisBar, title='COMPRA - OB + Estructura', message='{{ticker}} COMPRA: OB tocado y estructuras alineadas')
+alertcondition(obSellSignalThisBar, title='VENTA - OB + Estructura', message='{{ticker}} VENTA: OB tocado y estructuras alineadas')
+
 // ============================================
 // PART 7: EQUAL HIGHS/LOWS (EQH/EQL)
 // ============================================
@@ -1220,7 +1218,7 @@ plot(na)
 
 // Inputs para habilitar sesiones
 showSessions = input.bool(true, 'Show Trading Sessions', group='Trading Sessions')
-sessionTimezone = input.string('GMT-4', 'Timezone', group='Trading Sessions', tooltip='Your local timezone offset (e.g., GMT-4, GMT+1, GMT+0)')
+sessionTimezone = input.string('America/New_York', 'Timezone', group='Trading Sessions', tooltip='Zona horaria de referencia para los horarios de sesiones y Macro Windows (ej: America/New_York, Europe/London, UTC-4). Antes este input no estaba conectado a ningun calculo -- ahora si.')
 maxSessionsToShow = input.int(5, 'Number of Sessions to Show', minval=1, maxval=30, group='Trading Sessions', tooltip='Show up to 30 previous sessions')
 
 // Session 1: Tokyo
@@ -1250,7 +1248,7 @@ timeToMinutes(timeStr) =>
 
 // Función para verificar si estamos en una sesión
 inSession(sessionStart, sessionEnd) =>
-    currentMinutes = hour * 60 + minute
+    currentMinutes = hour(time, sessionTimezone) * 60 + minute(time, sessionTimezone)
     startMinutes = timeToMinutes(sessionStart)
     endMinutes = timeToMinutes(sessionEnd)
     
@@ -1509,7 +1507,6 @@ if enableSessionSweepSignals and closedSessions.size() > 0
                                  sessionLabelSizeValue)
                         
                         sess.buySignalSent := true
-                        alert('SESSION SWEEP COMPRA - ' + sess.name + ' Low swept + I.CHoCH!', alert.freq_once_per_bar)
             
             // ===== DETECTAR SWEEP AL HIGH (similar a liquidity sweep) =====
             if not sess.highSwept
@@ -1541,7 +1538,6 @@ if enableSessionSweepSignals and closedSessions.size() > 0
                                  sessionLabelSizeValue)
                         
                         sess.sellSignalSent := true
-                        alert('SESSION SWEEP VENTA - ' + sess.name + ' High swept + I.CHoCH!', alert.freq_once_per_bar)
         
         else if barsAfterClose > maxBarsAfterSession
             // Eliminar sesiones expiradas
@@ -2242,13 +2238,13 @@ Market_Structure(TF_SH, TF_SL, Swing_Length, Chart_as_Timeframe, TF_Period, TF_M
         if Prev_Breakout_Type == 1 and Use_Bos_Plot
             line.new(x1 = time[High_Count_Function] , y1 = TF_Prev_High, x2 =End_High_Time , y2 = TF_Prev_High
               , xloc = xloc.bar_time, color = Bul_Bos_Col, style=Line_Type_Control(Line_Type), width= Line_Width)
-            label.new(x = time[High_Count_Function/2], y = TF_Prev_High
+            label.new(x = time[int(High_Count_Function/2)], y = TF_Prev_High
               , xloc = xloc.bar_time, text = 'BOS \n' + TF_Display(Chart_as_Timeframe, TF_Period, TF_Multip)
               , color=Transparent_Color, style=label.style_label_down, textcolor=Bul_Bos_Col, size = Text_Size_Switch(TF_Text_Size))
         else if Prev_Breakout_Type == -1 and Use_MSS_Plot
             line.new(x1 = time[High_Count_Function] , y1 = TF_Prev_High, x2 =End_High_Time , y2 = TF_Prev_High
               , xloc = xloc.bar_time, color = Bul_Bos_Col, style=Line_Type_Control(Line_Type), width= Line_Width)
-            label.new(x = time[High_Count_Function/2], y = TF_Prev_High
+            label.new(x = time[int(High_Count_Function/2)], y = TF_Prev_High
               , xloc = xloc.bar_time, text = 'CHOCH \n' + TF_Display(Chart_as_Timeframe, TF_Period, TF_Multip)
               , color=Transparent_Color, style=label.style_label_down, textcolor=Bul_Bos_Col, size = Text_Size_Switch(TF_Text_Size))
 
@@ -2263,13 +2259,13 @@ Market_Structure(TF_SH, TF_SL, Swing_Length, Chart_as_Timeframe, TF_Period, TF_M
         if Prev_Breakout_Type == -1 and Use_Bos_Plot
             line.new(x1 = time[Low_Count_Function] , y1 = TF_Prev_Low, x2 = End_Low_Time, y2 = TF_Prev_Low
               , xloc = xloc.bar_time, color= Bear_Bos_Col, style=Line_Type_Control(Line_Type), width= Line_Width)
-            label.new(x = time[Low_Count_Function/2], y = TF_Prev_Low
+            label.new(x = time[int(Low_Count_Function/2)], y = TF_Prev_Low
               , xloc = xloc.bar_time, text = 'BOS \n' + TF_Display(Chart_as_Timeframe, TF_Period, TF_Multip)
               , color=Transparent_Color, textcolor=Bear_Bos_Col, style=label.style_label_up, size = Text_Size_Switch(TF_Text_Size))
         else if Prev_Breakout_Type == 1 and Use_MSS_Plot
             line.new(x1 = time[Low_Count_Function] , y1 = TF_Prev_Low, x2 = End_Low_Time, y2 = TF_Prev_Low
               , xloc = xloc.bar_time, color= Bear_Bos_Col, style=Line_Type_Control(Line_Type), width= Line_Width)
-            label.new(x = time[Low_Count_Function/2], y = TF_Prev_Low
+            label.new(x = time[int(Low_Count_Function/2)], y = TF_Prev_Low
               , xloc = xloc.bar_time, text = 'CHOCH \n' + TF_Display(Chart_as_Timeframe, TF_Period, TF_Multip)
               , color=Transparent_Color, textcolor=Bear_Bos_Col, style=label.style_label_up, size = Text_Size_Switch(TF_Text_Size))          
 
