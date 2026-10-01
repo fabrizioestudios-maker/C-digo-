@@ -1,0 +1,397 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/ MPL-2.0
+//@version=6
+indicator("Dual Market Structure & Golden Zone", shorttitle = "MS Structure", overlay = true, max_lines_count = 300, max_labels_count = 300, max_boxes_count = 20, calc_bars_count = 5000)
+
+// --- Constants ---
+const string GROUP_STRUCTURE = "Structure"
+const string GROUP_ZONES = "Golden Zone"
+const string GROUP_DISPLAY = "Display"
+const string GROUP_STYLE = "Style"
+const int MAX_HISTORY_OBJECTS = 70
+const color TRANSPARENT = #00000000
+
+// --- Inputs ---
+swingLengthInput = input.int(12, "Swing pivot length", minval = 2, maxval = 100, group = GROUP_STRUCTURE, tooltip = "Bars on each side required to confirm major swing highs and lows.")
+internalLengthInput = input.int(4, "Internal pivot length", minval = 1, maxval = 50, group = GROUP_STRUCTURE, tooltip = "Bars on each side required to confirm internal structure.")
+breakSourceInput = input.string("Close", "Break confirmation", options = ["Close", "Wick"], group = GROUP_STRUCTURE, tooltip = "Choose whether a close or a wick through a level confirms a structural break.")
+showSwingInput = input.bool(true, "Show swing structure", group = GROUP_DISPLAY, tooltip = "Displays the protected swing range and historical BOS levels.")
+showInternalInput = input.bool(true, "Show internal structure", group = GROUP_DISPLAY, tooltip = "Displays the protected internal high, low, and equilibrium.")
+showBosInput = input.bool(true, "Show BOS labels", group = GROUP_DISPLAY, tooltip = "Labels confirmed swing breaks of structure.")
+showFixedLabelsInput = input.bool(true, "Show fixed status", group = GROUP_DISPLAY, tooltip = "Displays Fixed High, Fixed Low, or Not Fixed Yet at swing anchors.")
+showDashboardInput = input.bool(true, "Show trend dashboard", group = GROUP_DISPLAY, tooltip = "Shows the current swing and internal directions at the lower right.")
+colorCandlesInput = input.bool(true, "Color candles", group = GROUP_DISPLAY, tooltip = "Colors candles orange in bullish internal structure and light gray in bearish structure.")
+projectionInput = input.int(80, "Swing projection bars", minval = 10, maxval = 500, group = GROUP_DISPLAY, tooltip = "Number of bars used to project swing levels to the right.")
+internalProjectionInput = input.int(24, "Internal projection bars", minval = 5, maxval = 100, group = GROUP_DISPLAY, tooltip = "Number of bars used to project internal levels to the right.")
+showGoldenZoneInput = input.bool(true, "Show retracement zone", group = GROUP_ZONES, tooltip = "Displays the directional golden retracement zone of the active internal range.")
+showFibGuidesInput = input.bool(false, "Show 0.618 / 0.700 guides", group = GROUP_ZONES, tooltip = "Displays the two dashed Fibonacci guide levels shown in the reference layout.")
+zoneStartInput = input.float(0.618, "First retracement", minval = 0.0, maxval = 1.0, step = 0.001, group = GROUP_ZONES, inline = "zone", tooltip = "First retracement ratio.")
+zoneEndInput = input.float(0.700, "Second retracement", minval = 0.0, maxval = 1.0, step = 0.001, group = GROUP_ZONES, inline = "zone", tooltip = "Second retracement ratio.")
+zoneWidthInput = input.int(18, "Zone width", minval = 5, maxval = 100, group = GROUP_ZONES, tooltip = "Width of the projected golden-zone box in bars.")
+bullColorInput = input.color(#ff9800, "Bullish", group = GROUP_STYLE, inline = "trend", tooltip = "Bullish candle and dashboard color.")
+bearColorInput = input.color(#f0f1f3, "Bearish", group = GROUP_STYLE, inline = "trend", tooltip = "Bearish candle and dashboard color.")
+levelColorInput = input.color(#9297a1, "Structure levels", group = GROUP_STYLE, tooltip = "Color used by structure levels and their captions.")
+zoneColorInput = input.color(#5b6475, "Golden zone", group = GROUP_STYLE, tooltip = "Fill color of the golden zone (no border), matching the London indicator's external Golden Zone style.")
+zoneTransparencyInput = input.int(76, "Zone transparency", minval = 0, maxval = 100, group = GROUP_STYLE, tooltip = "Transparency of the golden-zone fill.")
+
+// --- Utility functions ---
+f_deleteLine(line lineId) =>
+    if not na(lineId)
+        line.delete(lineId)
+
+f_deleteLabel(label labelId) =>
+    if not na(labelId)
+        label.delete(labelId)
+
+f_trimHistory(array<line> lineArray, array<label> labelArray) =>
+    if array.size(lineArray) > MAX_HISTORY_OBJECTS
+        line.delete(array.shift(lineArray))
+    if array.size(labelArray) > MAX_HISTORY_OBJECTS
+        label.delete(array.shift(labelArray))
+
+f_updateLine(line lineId, int x1, float y1, int x2, float y2, color lineColor, int lineWidth, string lineStyle) =>
+    line result = lineId
+    if na(result)
+        result := line.new(x1, y1, x2, y2, xloc = xloc.bar_index, color = lineColor, width = lineWidth, style = lineStyle)
+    else
+        line.set_xy1(result, x1, y1)
+        line.set_xy2(result, x2, y2)
+        line.set_color(result, lineColor)
+        line.set_width(result, lineWidth)
+        line.set_style(result, lineStyle)
+    result
+
+f_updateLabel(label labelId, int x, float y, string labelText, string labelStyle, color textColor, string textAlign) =>
+    label result = labelId
+    if na(result)
+        result := label.new(x, y, labelText, xloc = xloc.bar_index, style = labelStyle, color = TRANSPARENT, textcolor = textColor, size = size.tiny, textalign = textAlign)
+    else
+        label.set_xy(result, x, y)
+        label.set_text(result, labelText)
+        label.set_style(result, labelStyle)
+        label.set_color(result, TRANSPARENT)
+        label.set_textcolor(result, textColor)
+        label.set_textalign(result, textAlign)
+    result
+
+f_addBos(int levelBar, float levelPrice, int breakBar, array<line> lineArray, array<label> labelArray) =>
+    if showSwingInput
+        line bosLineId = line.new(levelBar, levelPrice, breakBar, levelPrice, xloc = xloc.bar_index, color = levelColorInput, width = 1)
+        array.push(lineArray, bosLineId)
+        if showBosInput
+            int middleBar = int(math.round(math.avg(levelBar, breakBar)))
+            label bosLabelId = label.new(middleBar, levelPrice, "BOS", xloc = xloc.bar_index, style = label.style_label_center, color = TRANSPARENT, textcolor = levelColorInput, size = size.tiny)
+            array.push(labelArray, bosLabelId)
+        f_trimHistory(lineArray, labelArray)
+
+// --- Confirmed pivots ---
+float swingPivotHigh = ta.pivothigh(high, swingLengthInput, swingLengthInput)
+float swingPivotLow = ta.pivotlow(low, swingLengthInput, swingLengthInput)
+float internalPivotHigh = ta.pivothigh(high, internalLengthInput, internalLengthInput)
+float internalPivotLow = ta.pivotlow(low, internalLengthInput, internalLengthInput)
+
+// --- Persistent market state ---
+var float lastSwingPivotHigh = na
+var float lastSwingPivotLow = na
+var int lastSwingPivotHighBar = na
+var int lastSwingPivotLowBar = na
+var float swingHigh = na
+var float swingLow = na
+var int swingHighBar = na
+var int swingLowBar = na
+var bool swingHighFixed = false
+var bool swingLowFixed = false
+var int swingTrend = 0
+
+var float lastInternalPivotHigh = na
+var float lastInternalPivotLow = na
+var int lastInternalPivotHighBar = na
+var int lastInternalPivotLowBar = na
+var float internalHigh = na
+var float internalLow = na
+var int internalHighBar = na
+var int internalLowBar = na
+var int internalTrend = 0
+
+var line swingHighLineId = na
+var line swingLowLineId = na
+var line internalHighLineId = na
+var line internalLowLineId = na
+var line internalMidLineId = na
+var line fibOneLineId = na
+var line fibTwoLineId = na
+var label swingHighTagId = na
+var label swingLowTagId = na
+var label swingHighStatusId = na
+var label swingLowStatusId = na
+var label internalHighTagId = na
+var label internalLowTagId = na
+var label fibOneLabelId = na
+var label fibTwoLabelId = na
+var box goldenZoneBoxId = na
+var label goldenZoneLabelId = na
+var array<line> historyLines = array.new<line>()
+var array<label> historyLabels = array.new<label>()
+
+// --- Register major pivots ---
+if not na(swingPivotHigh)
+    lastSwingPivotHigh := swingPivotHigh
+    lastSwingPivotHighBar := bar_index - swingLengthInput
+    if swingTrend == 0
+        swingHigh := swingPivotHigh
+        swingHighBar := lastSwingPivotHighBar
+        swingHighFixed := true
+    else if swingTrend == 1 and swingPivotHigh >= swingHigh - syminfo.mintick
+        swingHigh := swingPivotHigh
+        swingHighBar := lastSwingPivotHighBar
+        swingHighFixed := true
+    else if swingTrend == -1 and lastSwingPivotHighBar > swingLowBar
+        swingHigh := swingPivotHigh
+        swingHighBar := lastSwingPivotHighBar
+        swingHighFixed := true
+
+if not na(swingPivotLow)
+    lastSwingPivotLow := swingPivotLow
+    lastSwingPivotLowBar := bar_index - swingLengthInput
+    if swingTrend == 0
+        swingLow := swingPivotLow
+        swingLowBar := lastSwingPivotLowBar
+        swingLowFixed := true
+    else if swingTrend == -1 and swingPivotLow <= swingLow + syminfo.mintick
+        swingLow := swingPivotLow
+        swingLowBar := lastSwingPivotLowBar
+        swingLowFixed := true
+    else if swingTrend == 1 and lastSwingPivotLowBar > swingHighBar
+        swingLow := swingPivotLow
+        swingLowBar := lastSwingPivotLowBar
+        swingLowFixed := true
+
+// --- Register internal pivots ---
+if not na(internalPivotHigh)
+    lastInternalPivotHigh := internalPivotHigh
+    lastInternalPivotHighBar := bar_index - internalLengthInput
+    if internalTrend == 0
+        internalHigh := internalPivotHigh
+        internalHighBar := lastInternalPivotHighBar
+    else if internalTrend == -1 and (na(internalHighBar) or lastInternalPivotHighBar > internalLowBar)
+        internalHigh := internalPivotHigh
+        internalHighBar := lastInternalPivotHighBar
+    else if internalTrend == 1 and internalPivotHigh >= internalHigh - syminfo.mintick
+        internalHigh := internalPivotHigh
+        internalHighBar := lastInternalPivotHighBar
+
+if not na(internalPivotLow)
+    lastInternalPivotLow := internalPivotLow
+    lastInternalPivotLowBar := bar_index - internalLengthInput
+    if internalTrend == 0
+        internalLow := internalPivotLow
+        internalLowBar := lastInternalPivotLowBar
+    else if internalTrend == 1 and (na(internalLowBar) or lastInternalPivotLowBar > internalHighBar)
+        internalLow := internalPivotLow
+        internalLowBar := lastInternalPivotLowBar
+    else if internalTrend == -1 and internalPivotLow <= internalLow + syminfo.mintick
+        internalLow := internalPivotLow
+        internalLowBar := lastInternalPivotLowBar
+
+// --- Break detection ---
+float upperBreakSource = breakSourceInput == "Close" ? close : high
+float lowerBreakSource = breakSourceInput == "Close" ? close : low
+bool swingBullBreak = not na(swingHigh) and upperBreakSource > swingHigh and (swingTrend <= 0 or swingHighFixed)
+bool swingBearBreak = not na(swingLow) and lowerBreakSource < swingLow and (swingTrend >= 0 or swingLowFixed)
+bool internalBullBreak = not na(internalHigh) and upperBreakSource > internalHigh and internalTrend <= 0
+bool internalBearBreak = not na(internalLow) and lowerBreakSource < internalLow and internalTrend >= 0
+
+// Resolve rare outside bars in favor of the candle's closing direction.
+if swingBullBreak and swingBearBreak
+    swingBullBreak := close >= open
+    swingBearBreak := not swingBullBreak
+if internalBullBreak and internalBearBreak
+    internalBullBreak := close >= open
+    internalBearBreak := not internalBullBreak
+
+// --- Swing transitions and continuation breaks ---
+if swingBullBreak
+    f_addBos(swingHighBar, swingHigh, bar_index, historyLines, historyLabels)
+    swingTrend := 1
+    if not na(lastSwingPivotLow) and lastSwingPivotLowBar < bar_index
+        swingLow := lastSwingPivotLow
+        swingLowBar := lastSwingPivotLowBar
+        swingLowFixed := true
+    swingHigh := high
+    swingHighBar := bar_index
+    swingHighFixed := false
+
+if swingBearBreak
+    f_addBos(swingLowBar, swingLow, bar_index, historyLines, historyLabels)
+    swingTrend := -1
+    if not na(lastSwingPivotHigh) and lastSwingPivotHighBar < bar_index
+        swingHigh := lastSwingPivotHigh
+        swingHighBar := lastSwingPivotHighBar
+        swingHighFixed := true
+    swingLow := low
+    swingLowBar := bar_index
+    swingLowFixed := false
+
+// Keep the developing side of the swing range attached to the true extreme.
+if swingTrend == 1 and (na(swingHigh) or high > swingHigh)
+    swingHigh := high
+    swingHighBar := bar_index
+    swingHighFixed := false
+if swingTrend == -1 and (na(swingLow) or low < swingLow)
+    swingLow := low
+    swingLowBar := bar_index
+    swingLowFixed := false
+
+// --- Internal transitions ---
+if internalBullBreak
+    internalTrend := 1
+    if not na(lastInternalPivotLow)
+        internalLow := lastInternalPivotLow
+        internalLowBar := lastInternalPivotLowBar
+    internalHigh := high
+    internalHighBar := bar_index
+
+if internalBearBreak
+    internalTrend := -1
+    if not na(lastInternalPivotHigh)
+        internalHigh := lastInternalPivotHigh
+        internalHighBar := lastInternalPivotHighBar
+    internalLow := low
+    internalLowBar := bar_index
+
+if internalTrend == 1 and (na(internalHigh) or high > internalHigh)
+    internalHigh := high
+    internalHighBar := bar_index
+if internalTrend == -1 and (na(internalLow) or low < internalLow)
+    internalLow := low
+    internalLowBar := bar_index
+
+// --- Active swing drawings ---
+int swingRightBar = bar_index + projectionInput
+if showSwingInput and not na(swingHigh) and not na(swingHighBar)
+    swingHighLineId := f_updateLine(swingHighLineId, swingHighBar, swingHigh, swingRightBar, swingHigh, levelColorInput, 2, line.style_solid)
+    swingHighTagId := f_updateLabel(swingHighTagId, swingRightBar, swingHigh, "swh", label.style_label_left, levelColorInput, text.align_left)
+    if showFixedLabelsInput
+        string highStatus = swingHighFixed ? "Fixed High" : "Not Fixed Yet"
+        swingHighStatusId := f_updateLabel(swingHighStatusId, swingHighBar, swingHigh, highStatus, label.style_label_lower_left, levelColorInput, text.align_center)
+    else
+        f_deleteLabel(swingHighStatusId)
+        swingHighStatusId := na
+else
+    f_deleteLine(swingHighLineId)
+    f_deleteLabel(swingHighTagId)
+    f_deleteLabel(swingHighStatusId)
+    swingHighLineId := na
+    swingHighTagId := na
+    swingHighStatusId := na
+
+if showSwingInput and not na(swingLow) and not na(swingLowBar)
+    swingLowLineId := f_updateLine(swingLowLineId, swingLowBar, swingLow, swingRightBar, swingLow, levelColorInput, 2, line.style_solid)
+    swingLowTagId := f_updateLabel(swingLowTagId, swingRightBar, swingLow, "swl", label.style_label_left, levelColorInput, text.align_left)
+    if showFixedLabelsInput
+        string lowStatus = swingLowFixed ? "Fixed Low" : "Not Fixed Yet"
+        swingLowStatusId := f_updateLabel(swingLowStatusId, swingLowBar, swingLow, lowStatus, label.style_label_upper_left, levelColorInput, text.align_center)
+    else
+        f_deleteLabel(swingLowStatusId)
+        swingLowStatusId := na
+else
+    f_deleteLine(swingLowLineId)
+    f_deleteLabel(swingLowTagId)
+    f_deleteLabel(swingLowStatusId)
+    swingLowLineId := na
+    swingLowTagId := na
+    swingLowStatusId := na
+
+// --- Active internal drawings ---
+int internalRightBar = bar_index + internalProjectionInput
+bool validInternalRange = not na(internalHigh) and not na(internalLow) and not na(internalHighBar) and not na(internalLowBar) and internalHigh > internalLow
+if showInternalInput and validInternalRange
+    internalHighLineId := f_updateLine(internalHighLineId, internalHighBar, internalHigh, internalRightBar, internalHigh, levelColorInput, 1, line.style_solid)
+    internalLowLineId := f_updateLine(internalLowLineId, internalLowBar, internalLow, internalRightBar, internalLow, levelColorInput, 1, line.style_solid)
+    internalHighTagId := f_updateLabel(internalHighTagId, internalRightBar, internalHigh, "Int.h", label.style_label_left, levelColorInput, text.align_left)
+    internalLowTagId := f_updateLabel(internalLowTagId, internalRightBar, internalLow, "Int.l", label.style_label_left, levelColorInput, text.align_left)
+    int internalRangeLeftBar = math.max(internalHighBar, internalLowBar)
+    float internalMid = math.avg(internalHigh, internalLow)
+    internalMidLineId := f_updateLine(internalMidLineId, internalRangeLeftBar, internalMid, internalRightBar, internalMid, levelColorInput, 1, line.style_dashed)
+else
+    f_deleteLine(internalHighLineId)
+    f_deleteLine(internalLowLineId)
+    f_deleteLine(internalMidLineId)
+    f_deleteLabel(internalHighTagId)
+    f_deleteLabel(internalLowTagId)
+    internalHighLineId := na
+    internalLowLineId := na
+    internalMidLineId := na
+    internalHighTagId := na
+    internalLowTagId := na
+
+// --- Golden zone and Fibonacci guides ---
+if showGoldenZoneInput and validInternalRange and internalTrend != 0
+    float internalRange = internalHigh - internalLow
+    float firstRatio = math.min(zoneStartInput, zoneEndInput)
+    float secondRatio = math.max(zoneStartInput, zoneEndInput)
+    float firstPrice = internalTrend == 1 ? internalHigh - internalRange * firstRatio : internalLow + internalRange * firstRatio
+    float secondPrice = internalTrend == 1 ? internalHigh - internalRange * secondRatio : internalLow + internalRange * secondRatio
+    float zoneTop = math.max(firstPrice, secondPrice)
+    float zoneBottom = math.min(firstPrice, secondPrice)
+    int zoneLeftBar = math.max(internalHighBar, internalLowBar)
+    int zoneRightBar = math.max(bar_index, zoneLeftBar) + zoneWidthInput
+    if na(goldenZoneBoxId)
+        goldenZoneBoxId := box.new(zoneLeftBar, zoneTop, zoneRightBar, zoneBottom, xloc = xloc.bar_index, border_color = TRANSPARENT, border_width = 1, bgcolor = color.new(zoneColorInput, zoneTransparencyInput))
+    else
+        box.set_lefttop(goldenZoneBoxId, zoneLeftBar, zoneTop)
+        box.set_rightbottom(goldenZoneBoxId, zoneRightBar, zoneBottom)
+        box.set_border_color(goldenZoneBoxId, TRANSPARENT)
+        box.set_bgcolor(goldenZoneBoxId, color.new(zoneColorInput, zoneTransparencyInput))
+    goldenZoneLabelId := f_updateLabel(goldenZoneLabelId, int(math.round(math.avg(zoneLeftBar, zoneRightBar))), math.avg(zoneTop, zoneBottom), "Golden Zone", label.style_label_center, color.new(chart.fg_color, 45), text.align_center)
+else
+    if not na(goldenZoneBoxId)
+        box.delete(goldenZoneBoxId)
+    f_deleteLabel(goldenZoneLabelId)
+    goldenZoneBoxId := na
+    goldenZoneLabelId := na
+
+if showFibGuidesInput and validInternalRange and internalTrend != 0
+    float guideRange = internalHigh - internalLow
+    float fibOnePrice = internalTrend == 1 ? internalHigh - guideRange * 0.618 : internalLow + guideRange * 0.618
+    float fibTwoPrice = internalTrend == 1 ? internalHigh - guideRange * 0.700 : internalLow + guideRange * 0.700
+    int guideLeftBar = bar_index + 5
+    int guideRightBar = guideLeftBar + 10
+    fibOneLineId := f_updateLine(fibOneLineId, guideLeftBar, fibOnePrice, guideRightBar, fibOnePrice, levelColorInput, 1, line.style_dashed)
+    fibTwoLineId := f_updateLine(fibTwoLineId, guideLeftBar, fibTwoPrice, guideRightBar, fibTwoPrice, levelColorInput, 1, line.style_dashed)
+    fibOneLabelId := f_updateLabel(fibOneLabelId, guideRightBar + 2, fibOnePrice, "0.618", label.style_label_left, levelColorInput, text.align_left)
+    fibTwoLabelId := f_updateLabel(fibTwoLabelId, guideRightBar + 2, fibTwoPrice, "0.7", label.style_label_left, levelColorInput, text.align_left)
+else
+    f_deleteLine(fibOneLineId)
+    f_deleteLine(fibTwoLineId)
+    f_deleteLabel(fibOneLabelId)
+    f_deleteLabel(fibTwoLabelId)
+    fibOneLineId := na
+    fibTwoLineId := na
+    fibOneLabelId := na
+    fibTwoLabelId := na
+
+// --- Candle styling ---
+color structureCandleColor = internalTrend == 1 ? bullColorInput : internalTrend == -1 ? bearColorInput : na
+barcolor(colorCandlesInput ? structureCandleColor : na)
+
+// --- Trend dashboard ---
+var table trendTable = table.new(position.bottom_right, 3, 2, frame_color = bullColorInput, frame_width = 1, border_color = bullColorInput, border_width = 1)
+if barstate.islast
+    if showDashboardInput
+        color cellBackground = color.new(chart.bg_color, 3)
+        table.set_frame_color(trendTable, bullColorInput)
+        table.set_border_color(trendTable, bullColorInput)
+        table.cell(trendTable, 0, 0, "MS", text_color = chart.fg_color, bgcolor = cellBackground, text_size = size.normal)
+        table.cell(trendTable, 1, 0, "Swing", text_color = chart.fg_color, bgcolor = cellBackground, text_size = size.normal)
+        table.cell(trendTable, 2, 0, "Internal", text_color = chart.fg_color, bgcolor = cellBackground, text_size = size.normal)
+        table.cell(trendTable, 0, 1, "Trend", text_color = chart.fg_color, bgcolor = cellBackground, text_size = size.normal)
+        table.cell(trendTable, 1, 1, swingTrend == 1 ? "▲" : swingTrend == -1 ? "▼" : "—", text_color = swingTrend == 1 ? bullColorInput : swingTrend == -1 ? bearColorInput : levelColorInput, bgcolor = cellBackground, text_size = size.normal)
+        table.cell(trendTable, 2, 1, internalTrend == 1 ? "▲" : internalTrend == -1 ? "▼" : "—", text_color = internalTrend == 1 ? bullColorInput : internalTrend == -1 ? bearColorInput : levelColorInput, bgcolor = cellBackground, text_size = size.normal)
+    else
+        table.clear(trendTable, 0, 0, 2, 1)
+
+// --- Alerts ---
+alertcondition(swingBullBreak, "Bullish swing BOS", "Price confirmed a bullish break of swing structure.")
+alertcondition(swingBearBreak, "Bearish swing BOS", "Price confirmed a bearish break of swing structure.")
+alertcondition(internalBullBreak, "Bullish internal break", "Price confirmed a bullish break of internal structure.")
+alertcondition(internalBearBreak, "Bearish internal break", "Price confirmed a bearish break of internal structure.")
